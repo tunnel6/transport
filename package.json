@@ -1,12 +1,12 @@
 {
-  "name": "@yat/tunnel",
+  "name": "@yat/transport",
   "version": "1.0.0",
   "description": "YAT tunnel transport layer with native bindings",
   "main": "index.js",
   "types": "index.d.ts",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/yat/tunnel.git"
+    "url": "git+ssh://git@github.com/tunnel6/transport.git"
   },
   "license": "MIT",
   "browser": "browser.js",

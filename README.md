@@ -335,32 +335,45 @@ const msgSeq = getMessageSeq(data)
 
 ### 证书签发流程
 
+
 ```
-┌─────────┐                    ┌──────────┐                    ┌─────────┐
-│  yat-fe │                    │   Edge   │                    │ Captain │
-└────┬────┘                    └────┬─────┘                    └────┬────┘
-     │                              │                               │
-     │  1. 单向 TLS + OAuth         │                               │
-     │ ─────────────────────────────>                               │
-     │                              │                               │
-     │  2. 生成密钥对 + CSR         │                               │
-     │                              │                               │
-     │  3. CertRequest(CSR, Token)  │                               │
-     │ ─────────────────────────────>                               │
-     │                              │  4. 转发 CSR                  │
-     │                              │ ──────────────────────────────>
-     │                              │                               │
-     │                              │  5. 签发证书                  │
-     │                              │ <──────────────────────────────
-     │                              │                               │
-     │  6. CertResponse(证书)       │                               │
-     │ <─────────────────────────────                               │
-     │                              │                               │
-     │  7. 本地存储证书             │                               │
-     │                              │                               │
-     │  8. mTLS 连接                │                               │
-     │ ═════════════════════════════>                               │
-     │                              │                               │
+
+┌─────────────┐                         ┌─────────────┐
+│    Edge     │                         │     FE      │
+└──────┬──────┘                         └──────┬──────┘
+       │                                       │
+       │  【阶段 1：Edge 首次启动】               │
+       │                                       │
+       ├─→ 自签 Edge CA                          │
+       ├─→ 生成 Edge TLS 证书                    │
+       ├─→ 生成一次性配对 Token                   │
+       │   (如: abc123-def456, 5 分钟过期)        │
+       ├─→ 输出到控制台 / CLI                     │
+       │                                       │
+       │  【阶段 2：FE 发起配对】                 │
+       │                                       │
+       │                          用户输入 Token │
+       │                          + Edge 地址 ──▶│
+       │                                       │
+       │                          POST /pair     │
+       │                          {token, csr}──▶│
+       │                                       │
+       │  【阶段 3：Edge 验证 + 签发】            │
+       │                                       │
+       ├─→ 验证 Token (一次性)                   │
+       ├─→ 用 Edge CA 签发客户端证书              │
+       ├─→ 删除 Token                           │
+       │                                       │
+       │            ◀── 返回客户端证书 + CA 证书 ──│
+       │                                       │
+       │  【阶段 4：mTLS 连接】                   │
+       │                                       │
+       │                          保存证书       │
+       │                          建立 mTLS ────▶│
+       │                                       │
+       ├─→ 验证客户端证书 (Edge CA 签发)           │
+       ├─→ 允许连接                             │
+       │                                       │
 ```
 
 ### 依赖
@@ -382,7 +395,7 @@ const msgSeq = getMessageSeq(data)
 +----------------+------------------------+
 ```
 
-CSR CN 格式：`device_{deviceId}`。签发后的身份和权限由 Edge/Captain 根据凭据决定。
+CSR CN 格式：`device_{deviceId}`。签发后的身份和权限由 Edge 根据凭据决定。
 
 ### Protocol and compatibility policy sources / 协议与兼容策略来源
 
@@ -391,15 +404,3 @@ protocol major/minor) and `compatibility.json` (minimum Edge product version).
 `build/fb/rust/` and `build/compatibility.json` are committed API artifacts, not
 independently maintained definitions. Cargo embeds these artifacts so this crate
 and CLI consumers can build without an API checkout. Never edit the copies by hand.
-
-唯一维护源位于 API 仓库；transport 只执行校验。FE 显示 Agent Auth 诊断中的版本下限，
-不另外维护配置。更新 API 后，在 workspace 根目录执行：
-
-```bash
-bash api/scripts/gen.sh flatbuffer
-bash api/scripts/gen.sh sync-transport
-bash api/scripts/gen.sh check-transport
-```
-
-For a separate checkout, pass `--transport-root /path/to/transport` to the sync or
-check command. The check fails when any synchronized artifact differs.

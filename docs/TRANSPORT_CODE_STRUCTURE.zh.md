@@ -1,6 +1,8 @@
 # Transport Code Structure
 
-本文档用于描述 `modules/tunnel/transport` 当前代码结构、关键调用链与维护约束，方便后续继续重构与死代码清理。
+> Other languages: [English](./TRANSPORT_CODE_STRUCTURE.md) | [日本語](./TRANSPORT_CODE_STRUCTURE.ja.md) | [Español](./TRANSPORT_CODE_STRUCTURE.es.md)
+
+本文档用于描述 `tunnel/transport` 当前代码结构、关键调用链与维护约束，方便后续继续重构与死代码清理。
 
 ## 1. 顶层分层
 
