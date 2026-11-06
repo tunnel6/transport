@@ -151,42 +151,42 @@ const msgSeq = getMessageSeq(data)
 ### Certificate Flow
 
 ```
-┌─────────────┐                         ┌─────────────┐
-│    Edge     │                         │     FE      │
-└──────┬──────┘                         └──────┬──────┘
-│                                              │
-│  [Phase 1: Edge Initial Boot]                │
-│                                              │
-├─→ Self-sign Edge CA                          │
-├─→ Generate Edge TLS Certificate              │
-├─→ Generate One-Time Pairing Token            │
-│   (e.g., abc123-def456, 5m expiry)           │
-├─→ Output to Console / CLI                    │
-│                                              │
-│  [Phase 2: FE Initiates Pairing]             │
-│                                              │
-│                          User enters Token   │
-│                           + Edge Address ───▶│
-│                                              │
-│                          POST /pair          │
-│                          {token, csr}──▶     │
-│                                              │
-│  [Phase 3: Edge Verify + Issue]              │
-│                                              │
-├─→ Verify Token (One-time use)                │
-├─→ Sign Client Cert with Edge CA              │
-├─→ Delete Token                               │
-│                                              │
-│            ◀── Return Client Cert + CA Cert ─│
-│                                              │
-│  [Phase 4: mTLS Connection]                  │
-│                                              │
-│                          Save Certificates   │
-│                          Establish mTLS ───▶ │
-│                                              │
-├─→ Verify Client Cert (Signed by CA)          │
-├─→ Allow Connection                           │
-│                                              │
+┌─────────────┐                                ┌─────────────┐
+│    Edge     │                                │     FE      │
+└──────┬──────┘                                └──────┬──────┘
+       │                                              │
+       │  [Phase 1: Edge Initial Boot]                │
+       │                                              │
+       ├─→ Self-sign Edge CA                          │
+       ├─→ Generate Edge TLS Certificate              │
+       ├─→ Generate One-Time Pairing Token            │
+       │   (e.g., abc123-def456, 5m expiry)           │
+       ├─→ Output to Console / CLI                    │
+       │                                              │
+       │  [Phase 2: FE Initiates Pairing]             │
+       │                                              │
+       │                          User enters Token   │
+       │                           + Edge Address ───▶│
+       │                                              │
+       │                          POST /pair          │
+       │                          {token, csr}──▶     │
+       │                                              │
+       │  [Phase 3: Edge Verify + Issue]              │
+       │                                              │
+       ├─→ Verify Token (One-time use)                │
+       ├─→ Sign Client Cert with Edge CA              │
+       ├─→ Delete Token                               │
+       │                                              │
+       │            ◀── Return Client Cert + CA Cert ─│
+       │                                              │
+       │  [Phase 4: mTLS Connection]                  │
+       │                                              │
+       │                          Save Certificates   │
+       │                          Establish mTLS ───▶ │
+       │                                              │
+       ├─→ Verify Client Cert (Signed by CA)          │
+       ├─→ Allow Connection                           │
+       │                                              │
 
 ```
        
@@ -351,42 +351,42 @@ const msgSeq = getMessageSeq(data)
 
 ```
 
-┌─────────────┐                         ┌─────────────┐
-│    Edge     │                         │     FE      │
-└──────┬──────┘                         └──────┬──────┘
-       │                                       │
-       │  【阶段 1：Edge 首次启动】               │
-       │                                       │
-       ├─→ 自签 Edge CA                          │
-       ├─→ 生成 Edge TLS 证书                    │
-       ├─→ 生成一次性配对 Token                   │
-       │   (如: abc123-def456, 5 分钟过期)        │
-       ├─→ 输出到控制台 / CLI                     │
-       │                                       │
-       │  【阶段 2：FE 发起配对】                 │
-       │                                       │
-       │                          用户输入 Token │
-       │                          + Edge 地址 ──▶│
-       │                                       │
-       │                          POST /pair     │
-       │                          {token, csr}──▶│
-       │                                       │
-       │  【阶段 3：Edge 验证 + 签发】            │
-       │                                       │
-       ├─→ 验证 Token (一次性)                   │
-       ├─→ 用 Edge CA 签发客户端证书              │
-       ├─→ 删除 Token                           │
-       │                                       │
-       │            ◀── 返回客户端证书 + CA 证书 ──│
-       │                                       │
-       │  【阶段 4：mTLS 连接】                   │
-       │                                       │
-       │                          保存证书       │
-       │                          建立 mTLS ────▶│
-       │                                       │
-       ├─→ 验证客户端证书 (Edge CA 签发)           │
-       ├─→ 允许连接                             │
-       │                                       │
+┌─────────────┐                                ┌─────────────┐
+│    Edge     │                                │     FE      │
+└──────┬──────┘                                └──────┬──────┘
+       │                                              │
+       │  【阶段 1：Edge 首次启动】                      │
+       │                                              │
+       ├─→ 自签 Edge CA                                │
+       ├─→ 生成 Edge TLS 证书                          │
+       ├─→ 生成一次性配对 Token                         │
+       │   (如: abc123-def456, 5 分钟过期)              │
+       ├─→ 输出到控制台 / CLI                           │
+       │                                              │
+       │  【阶段 2：FE 发起配对】                        │
+       │                                              │
+       │                                 用户输入 Token│
+       │                                + Edge 地址 ──▶│
+       │                                              │
+       │                          POST /pair          │
+       │                               {token, csr}──▶│
+       │                                              │
+       │  【阶段 3：Edge 验证 + 签发】                   │
+       │                                              │
+       ├─→ 验证 Token (一次性)                          │
+       ├─→ 用 Edge CA 签发客户端证书                     │
+       ├─→ 删除 Token                                  │
+       │                                              │
+       │                  ◀── 返回客户端证书 + CA 证书 ──│
+       │                                              │
+       │  【阶段 4：mTLS 连接】                         │
+       │                                              │
+       │                                 保存证书      │
+       │                                建立 mTLS ────▶│
+       │                                              │
+       ├─→ 验证客户端证书 (Edge CA 签发)                 │
+       ├─→ 允许连接                                    │
+       │                                              │
 ```
 
 ### 依赖
