@@ -151,32 +151,45 @@ const msgSeq = getMessageSeq(data)
 ### Certificate Flow
 
 ```
-┌─────────┐                    ┌──────────┐                    ┌─────────┐
-│  yat-fe │                    │   Edge   │                    │ Captain │
-└────┬────┘                    └────┬─────┘                    └────┬────┘
-     │                              │                               │
-     │  1. One-way TLS + OAuth      │                               │
-     │ ─────────────────────────────>                               │
-     │                              │                               │
-     │  2. Generate KeyPair + CSR   │                               │
-     │                              │                               │
-     │  3. CertRequest(CSR, Token)  │                               │
-     │ ─────────────────────────────>                               │
-     │                              │  4. Forward CSR               │
-     │                              │ ──────────────────────────────>
-     │                              │                               │
-     │                              │  5. Signed Certificate        │
-     │                              │ <──────────────────────────────
-     │                              │                               │
-     │  6. CertResponse(Cert)       │                               │
-     │ <─────────────────────────────                               │
-     │                              │                               │
-     │  7. Store Cert locally       │                               │
-     │                              │                               │
-     │  8. mTLS Connection          │                               │
-     │ ═════════════════════════════>                               │
-     │                              │                               │
+┌─────────────┐                         ┌─────────────┐
+│    Edge     │                         │     FE      │
+└──────┬──────┘                         └──────┬──────┘
+│                                              │
+│  [Phase 1: Edge Initial Boot]                │
+│                                              │
+├─→ Self-sign Edge CA                          │
+├─→ Generate Edge TLS Certificate              │
+├─→ Generate One-Time Pairing Token            │
+│   (e.g., abc123-def456, 5m expiry)           │
+├─→ Output to Console / CLI                    │
+│                                              │
+│  [Phase 2: FE Initiates Pairing]             │
+│                                              │
+│                          User enters Token   │
+│                           + Edge Address ───▶│
+│                                              │
+│                          POST /pair          │
+│                          {token, csr}──▶     │
+│                                              │
+│  [Phase 3: Edge Verify + Issue]              │
+│                                              │
+├─→ Verify Token (One-time use)                │
+├─→ Sign Client Cert with Edge CA              │
+├─→ Delete Token                               │
+│                                              │
+│            ◀── Return Client Cert + CA Cert ─│
+│                                              │
+│  [Phase 4: mTLS Connection]                  │
+│                                              │
+│                          Save Certificates   │
+│                          Establish mTLS ───▶ │
+│                                              │
+├─→ Verify Client Cert (Signed by CA)          │
+├─→ Allow Connection                           │
+│                                              │
+
 ```
+       
 
 ### Dependencies
 
