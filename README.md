@@ -1,87 +1,405 @@
-# `@napi-rs/package-template`
+# Transport Module | Transport 模块
 
-![https://github.com/napi-rs/package-template/actions](https://github.com/napi-rs/package-template/workflows/CI/badge.svg)
+[English](#english) | [中文](#chinese)
 
-> Template project for writing node packages with napi-rs.
+---
 
-# Usage
+<a name="english"></a>
 
-1. Click **Use this template**.
-2. **Clone** your project.
-3. Run `yarn install` to install dependencies.
-4. Run `yarn napi rename -n [@your-scope/package-name] -b [binary-name]` command under the project folder to rename your package.
+## English
 
-## Install this test package
+### Overview
 
-```bash
-yarn add @napi-rs/package-template
+The Transport module is a Rust-based client communication layer for yat-fe (Electron) to communicate with Edge servers. It provides certificate management, mTLS connection handling, and FlatBuffers-based protocol communication through NAPI-RS bindings.
+
+### Features
+
+- **Certificate Request**: First-time connection via OAuth Token to request client certificates from Edge
+- **mTLS Connection**: Mutual TLS authentication with Edge servers
+- **Message Framing**: Length-prefixed message format `[4-byte length (little-endian)][FlatBuffers message]`
+- **Heartbeat**: Automatic heartbeat maintenance for connection keep-alive
+- **Request-Response Matching**: Sequence-based request-response correlation
+- **Edge Control**: Online/Offline control for Edge service management
+- **Actor-aware Tunnel Metadata**: Parse/build `actor_role`, `actor_session_id`, `actor_device_id` for tunnel sync/upsert/event
+- **Actor-aware Tunnel Start**: `startTunnel` supports passing actor context in request config
+
+### Architecture
+
+```
+transport/src/
+├── lib.rs              # NAPI interface exports
+├── error.rs            # Error type definitions
+├── protocol/
+│   ├── mod.rs          # Protocol module entry
+│   ├── generated.rs    # FlatBuffers generated code import
+│   └── message.rs      # High-level message builder/reader API
+└── client/
+    ├── mod.rs          # Client module entry
+    ├── connection.rs   # TCP/TLS connection management
+    ├── framing.rs      # Message frame encoding/decoding
+    ├── cert.rs         # Key pair and CSR generation
+    └── edge_client.rs  # EdgeClient main class
 ```
 
-## Ability
-
-### Build
-
-After `yarn build/npm run build` command, you can see `package-template.[darwin|win32|linux].node` file in project root. This is the native addon built from [lib.rs](./src/lib.rs).
-
-### Test
-
-With [ava](https://github.com/avajs/ava), run `yarn test/npm run test` to testing native addon. You can also switch to another testing framework if you want.
-
-### CI
-
-With GitHub Actions, each commit and pull request will be built and tested automatically in [`node@20`, `@node22`] x [`macOS`, `Linux`, `Windows`] matrix. You will never be afraid of the native addon broken in these platforms.
-
-### Release
-
-Release native package is very difficult in old days. Native packages may ask developers who use it to install `build toolchain` like `gcc/llvm`, `node-gyp` or something more.
-
-With `GitHub actions`, we can easily prebuild a `binary` for major platforms. And with `N-API`, we should never be afraid of **ABI Compatible**.
-
-The other problem is how to deliver prebuild `binary` to users. Downloading it in `postinstall` script is a common way that most packages do it right now. The problem with this solution is it introduced many other packages to download binary that has not been used by `runtime codes`. The other problem is some users may not easily download the binary from `GitHub/CDN` if they are behind a private network (But in most cases, they have a private NPM mirror).
-
-In this package, we choose a better way to solve this problem. We release different `npm packages` for different platforms. And add it to `optionalDependencies` before releasing the `Major` package to npm.
-
-`NPM` will choose which native package should download from `registry` automatically. You can see [npm](./npm) dir for details. And you can also run `yarn add @napi-rs/package-template` to see how it works.
-
-## Develop requirements
-
-- Install the latest `Rust`
-- Install `Node.js@10+` which fully supported `Node-API`
-- Install `yarn@1.x`
-
-## Test in local
-
-- yarn
-- yarn build
-- yarn test
-
-And you will see:
+### Installation
 
 ```bash
-$ ava --verbose
-
-  ✔ sync function from native code
-  ✔ sleep function from native code (201ms)
-  ─
-
-  2 tests passed
-✨  Done in 1.12s.
+cd modules/tunnel/transport
+yarn install
+yarn build
 ```
 
-## Release package
+### Usage
 
-Ensure you have set your **NPM_TOKEN** in the `GitHub` project setting.
+#### 1. Request Certificate (First Connection)
 
-In `Settings -> Secrets`, add **NPM_TOKEN** into it.
+```typescript
+import { requestCertificate } from 'tunnel'
 
-When you want to release the package:
+const cert = await requestCertificate(
+  'edge.example.com', // host
+  8443, // port
+  undefined, // serverName (defaults to {edgeId}.edge.myproxy.dev)
+  caCertBuffer, // CA certificate (PEM)
+  'invite:credential', // One prefixed enrollment token
+  'device-456', // Device ID
+  'edge-example', // Edge ID
+)
+
+// Store the certificate
+console.log(cert.certificate) // Client certificate (PEM)
+console.log(cert.privateKey) // Private key (PEM)
+console.log(cert.caCertificate) // CA certificate chain (PEM)
+console.log(cert.expiresAt) // Expiration timestamp (ms)
+console.log(cert.serialNumber) // Certificate serial number
+```
+
+#### 2. Connect with mTLS
+
+```typescript
+import { JsEdgeClient } from 'tunnel'
+
+const client = new JsEdgeClient({
+  host: 'edge.example.com',
+  port: 8443,
+  caCert: caCertBuffer,
+  clientCert: clientCertBuffer,
+  clientKey: clientKeyBuffer,
+  heartbeatIntervalSecs: 30, // optional
+})
+
+// Connect
+await client.connect()
+
+// Authenticate
+const authResult = await client.authenticate({
+  deviceId: 'device-456',
+  clientVersion: '1.0.0',
+  capabilities: ['tunnel', 'push'],
+})
+
+if (authResult.success) {
+  console.log('Session ID:', authResult.sessionId)
+}
+
+// Edge online/offline control
+await client.edgeOnline()
+await client.edgeOffline()
+
+// Disconnect
+await client.disconnect()
+```
+
+#### 2.1 Start Tunnel with Actor Context
+
+```typescript
+const result = await client.startTunnel(
+  'tunnel-1',
+  [
+    {
+      key: 'tcp-main',
+      protocol: 'tcp',
+      localHost: '127.0.0.1',
+      localPort: 5900,
+      bufferSize: 16384,
+      metadataJson: JSON.stringify({ eagerConnectRemote: true }),
+    },
+  ],
+  undefined, // edgeId
+  0, // mode: all-or-nothing
+  3, // actorRole: controller
+  'session-xyz', // actorSessionId
+  'device-abc', // actorDeviceId
+  false, // reconnect
+)
+```
+
+#### 3. Low-level Protocol API (Optional)
+
+```typescript
+import { buildAuthRequest, buildHeartbeat, getMessageType, getMessageSeq } from 'tunnel'
+
+// Build messages manually
+const authMsg = buildAuthRequest(1, null, 'user-123', 'device-456', '1.0.0', [])
+const heartbeatMsg = buildHeartbeat(2, 'session-id')
+
+// Parse message metadata
+const msgType = getMessageType(data)
+const msgSeq = getMessageSeq(data)
+```
+
+### Certificate Flow
+
+```
+┌─────────┐                    ┌──────────┐                    ┌─────────┐
+│  yat-fe │                    │   Edge   │                    │ Captain │
+└────┬────┘                    └────┬─────┘                    └────┬────┘
+     │                              │                               │
+     │  1. One-way TLS + OAuth      │                               │
+     │ ─────────────────────────────>                               │
+     │                              │                               │
+     │  2. Generate KeyPair + CSR   │                               │
+     │                              │                               │
+     │  3. CertRequest(CSR, Token)  │                               │
+     │ ─────────────────────────────>                               │
+     │                              │  4. Forward CSR               │
+     │                              │ ──────────────────────────────>
+     │                              │                               │
+     │                              │  5. Signed Certificate        │
+     │                              │ <──────────────────────────────
+     │                              │                               │
+     │  6. CertResponse(Cert)       │                               │
+     │ <─────────────────────────────                               │
+     │                              │                               │
+     │  7. Store Cert locally       │                               │
+     │                              │                               │
+     │  8. mTLS Connection          │                               │
+     │ ═════════════════════════════>                               │
+     │                              │                               │
+```
+
+### Dependencies
+
+- **napi-rs**: Node.js N-API bindings for Rust
+- **flatbuffers**: Google FlatBuffers serialization
+- **tokio**: Async runtime
+- **tokio-rustls**: TLS support
+- **rcgen**: Key pair and CSR generation
+
+---
+
+<a name="chinese"></a>
+
+## 中文
+
+### 概述
+
+Transport 模块是一个基于 Rust 的客户端通信层，用于 yat-fe (Electron) 与 Edge 服务器通信。通过 NAPI-RS 绑定提供证书管理、mTLS 连接处理和基于 FlatBuffers 的协议通信。
+
+### 功能特性
+
+- **证书申请**: 首次连接通过 OAuth Token 向 Edge 申请客户端证书
+- **mTLS 连接**: 与 Edge 服务器的双向 TLS 认证
+- **消息帧**: 长度前缀消息格式 `[4字节长度(小端)][FlatBuffers消息体]`
+- **心跳维护**: 自动心跳保持连接活跃
+- **请求-响应匹配**: 基于序列号的请求响应关联
+- **Edge 控制**: Edge 服务上下线管理
+- **Actor 感知的 Tunnel 元数据**: 支持解析/构建 `actor_role`、`actor_session_id`、`actor_device_id`
+- **Actor 感知的 Tunnel 启动**: `startTunnel` 支持传入 actor 上下文
+
+### 架构
+
+```
+transport/src/
+├── lib.rs              # NAPI 接口导出
+├── error.rs            # 错误类型定义
+├── protocol/
+│   ├── mod.rs          # 协议模块入口
+│   ├── generated.rs    # FlatBuffers 生成代码引入
+│   └── message.rs      # 高级消息构建/解析 API
+└── client/
+    ├── mod.rs          # 客户端模块入口
+    ├── connection.rs   # TCP/TLS 连接管理
+    ├── framing.rs      # 消息帧编解码
+    ├── cert.rs         # 密钥对和 CSR 生成
+    └── edge_client.rs  # EdgeClient 主类
+```
+
+### 安装
 
 ```bash
-npm version [<newversion> | major | minor | patch | premajor | preminor | prepatch | prerelease [--preid=<prerelease-id>] | from-git]
-
-git push
+cd modules/tunnel/transport
+yarn install
+yarn build
 ```
 
-GitHub actions will do the rest job for you.
+### 使用方法
 
-> WARN: Don't run `npm publish` manually.
+#### 1. 申请证书（首次连接）
+
+```typescript
+import { requestCertificate } from 'tunnel'
+
+const cert = await requestCertificate(
+  'edge.example.com', // 主机
+  8443, // 端口
+  undefined, // serverName (defaults to {edgeId}.edge.myproxy.dev)
+  caCertBuffer, // CA 证书 (PEM)
+  'invite:credential', // 单一带前缀的签发凭据
+  'device-456', // 设备 ID
+  'edge-example', // Edge ID
+)
+
+// 存储证书
+console.log(cert.certificate) // 客户端证书 (PEM)
+console.log(cert.privateKey) // 私钥 (PEM)
+console.log(cert.caCertificate) // CA 证书链 (PEM)
+console.log(cert.expiresAt) // 过期时间戳（毫秒）
+console.log(cert.serialNumber) // 证书序列号
+```
+
+#### 2. 使用 mTLS 连接
+
+````typescript
+import { JsEdgeClient } from 'tunnel'
+
+const client = new JsEdgeClient({
+  host: 'edge.example.com',
+  port: 8443,
+  caCert: caCertBuffer,
+  clientCert: clientCertBuffer,
+  clientKey: clientKeyBuffer,
+  heartbeatIntervalSecs: 30, // 可选
+})
+
+// 连接
+await client.connect()
+
+// 认证
+const authResult = await client.authenticate({
+  deviceId: 'device-456',
+  clientVersion: '1.0.0',
+  capabilities: ['tunnel', 'push'],
+})
+
+if (authResult.success) {
+  console.log('会话 ID:', authResult.sessionId)
+}
+
+#### 2.1 传入 Actor 上下文启动 Tunnel
+
+```typescript
+const result = await client.startTunnel(
+  'tunnel-1',
+  [
+    {
+      key: 'tcp-main',
+      protocol: 'tcp',
+      localHost: '127.0.0.1',
+      localPort: 5900,
+      bufferSize: 16384,
+      metadataJson: JSON.stringify({ eagerConnectRemote: true }),
+    },
+  ],
+  undefined, // edgeId
+  0, // mode: all-or-nothing
+  3, // actorRole: controller
+  'session-xyz', // actorSessionId
+  'device-abc', // actorDeviceId
+  false, // reconnect
+)
+````
+
+// Edge 上下线控制
+await client.edgeOnline()
+await client.edgeOffline()
+
+// 断开连接
+await client.disconnect()
+
+````
+
+#### 3. 底层协议 API（可选）
+
+```typescript
+import { buildAuthRequest, buildHeartbeat, getMessageType, getMessageSeq } from 'tunnel'
+
+// 手动构建消息
+const authMsg = buildAuthRequest(1, null, 'user-123', 'device-456', '1.0.0', [])
+const heartbeatMsg = buildHeartbeat(2, 'session-id')
+
+// 解析消息元数据
+const msgType = getMessageType(data)
+const msgSeq = getMessageSeq(data)
+````
+
+### 证书签发流程
+
+```
+┌─────────┐                    ┌──────────┐                    ┌─────────┐
+│  yat-fe │                    │   Edge   │                    │ Captain │
+└────┬────┘                    └────┬─────┘                    └────┬────┘
+     │                              │                               │
+     │  1. 单向 TLS + OAuth         │                               │
+     │ ─────────────────────────────>                               │
+     │                              │                               │
+     │  2. 生成密钥对 + CSR         │                               │
+     │                              │                               │
+     │  3. CertRequest(CSR, Token)  │                               │
+     │ ─────────────────────────────>                               │
+     │                              │  4. 转发 CSR                  │
+     │                              │ ──────────────────────────────>
+     │                              │                               │
+     │                              │  5. 签发证书                  │
+     │                              │ <──────────────────────────────
+     │                              │                               │
+     │  6. CertResponse(证书)       │                               │
+     │ <─────────────────────────────                               │
+     │                              │                               │
+     │  7. 本地存储证书             │                               │
+     │                              │                               │
+     │  8. mTLS 连接                │                               │
+     │ ═════════════════════════════>                               │
+     │                              │                               │
+```
+
+### 依赖
+
+- **napi-rs**: Rust 的 Node.js N-API 绑定
+- **flatbuffers**: Google FlatBuffers 序列化
+- **tokio**: 异步运行时
+- **tokio-rustls**: TLS 支持
+- **rcgen**: 密钥对和 CSR 生成
+
+### 协议格式
+
+消息帧格式：
+
+```
++----------------+------------------------+
+| 4 bytes        | N bytes                |
+| Length (LE)    | FlatBuffers Message    |
++----------------+------------------------+
+```
+
+CSR CN 格式：`device_{deviceId}`。签发后的身份和权限由 Edge/Captain 根据凭据决定。
+
+### Protocol and compatibility policy sources / 协议与兼容策略来源
+
+The API repository owns `schema/message.fbs` (message IDs, wire fields and current
+protocol major/minor) and `compatibility.json` (minimum Edge product version).
+`build/fb/rust/` and `build/compatibility.json` are committed API artifacts, not
+independently maintained definitions. Cargo embeds these artifacts so this crate
+and CLI consumers can build without an API checkout. Never edit the copies by hand.
+
+唯一维护源位于 API 仓库；transport 只执行校验。FE 显示 Agent Auth 诊断中的版本下限，
+不另外维护配置。更新 API 后，在 workspace 根目录执行：
+
+```bash
+bash api/scripts/gen.sh flatbuffer
+bash api/scripts/gen.sh sync-transport
+bash api/scripts/gen.sh check-transport
+```
+
+For a separate checkout, pass `--transport-root /path/to/transport` to the sync or
+check command. The check fails when any synchronized artifact differs.
