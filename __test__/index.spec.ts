@@ -1,8 +1,10 @@
 import test from 'ava'
 
-import { plus100 } from '../index'
+import { buildHeartbeat, getMessageSeq, getMessageType } from '../index'
 
-test('sync function from native code', (t) => {
-  const fixture = 42
-  t.is(plus100(fixture), fixture + 100)
+test('buildHeartbeat + getMessageType/getMessageSeq', (t) => {
+  const seq = 123
+  const data = buildHeartbeat(seq, 'test-session')
+  t.is(getMessageSeq(data), seq)
+  t.is(getMessageType(data), 0x2000)
 })

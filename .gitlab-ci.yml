@@ -1,0 +1,611 @@
+stages:
+  - build
+  - package
+
+variables:
+  APP_NAME: tunnel
+  APT_UBUNTU_MIRROR: http://mirrors.tuna.tsinghua.edu.cn/ubuntu
+  APT_DEBIAN_MIRROR: http://mirrors.tuna.tsinghua.edu.cn/debian
+  APT_DEBIAN_SECURITY_MIRROR: http://mirrors.tuna.tsinghua.edu.cn/debian-security
+  NPM_REGISTRY_URL: https://registry.npmmirror.com
+  NPM_CONFIG_REGISTRY: https://registry.npmmirror.com
+  RUSTUP_DIST_SERVER: https://rsproxy.cn
+  RUSTUP_UPDATE_ROOT: https://rsproxy.cn/rustup
+  # CARGO_REGISTRY_URL: sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/
+  CARGO_REGISTRY_URL: sparse+https://mirrors.ustc.edu.cn/crates.io-index/
+  RUST_BACKTRACE: '1'
+  RUSTUP_HOME: '$CI_PROJECT_DIR/.rustup'
+  RUSTUP_PERMIT_COPY_RENAME: '1'
+  CARGO_HOME: '/cache/cargo'
+  YARN_CACHE_FOLDER: '$CI_PROJECT_DIR/.yarn-cache'
+  XWIN_CACHE_DIR: '$CI_PROJECT_DIR/.xwin'
+  MACOSX_DEPLOYMENT_TARGET: '10.13'
+  ZIG_VERSION: '0.16.0'
+  ZIG_VERSION_APPLE: '0.15.2'
+  CARGO_ZIGBUILD_VERSION: '0.22.2'
+  ZIG_OFFICIAL_BASE: https://ziglang.org/download
+
+cache:
+  key: '$CI_COMMIT_REF_SLUG'
+  paths:
+    - .rustup/toolchains/
+    - .rustup/downloads/
+    - .rustup/update-hashes/
+    - .cargo/registry/
+    - .cargo/git/
+    - .xwin/
+    - .napi-rs/
+    - node_modules/
+    - .yarn-cache/
+
+.build_template: &build_template
+  stage: build
+  image: ghcr.io/napi-rs/napi-rs/nodejs-rust:lts-debian
+  before_script:
+    - node --version
+    - npm --version
+    - |
+      # Normalize HOME/cache locations early so all child processes (yarn/node/cargo-zigbuild/zig)
+      # use workspace-local writable paths instead of /root/.cache.
+      export HOME="${CI_PROJECT_DIR}"
+      export XDG_CACHE_HOME="${CI_PROJECT_DIR}/.cache"
+      export CARGO_ZIGBUILD_CACHE_DIR="${XDG_CACHE_HOME}/cargo-zigbuild"
+      export ZIG_GLOBAL_CACHE_DIR="${CI_PROJECT_DIR}/.zig-cache/global"
+      export ZIG_LOCAL_CACHE_DIR="${CI_PROJECT_DIR}/.zig-cache/local"
+      mkdir -p "${HOME}" "${XDG_CACHE_HOME}" "${CARGO_ZIGBUILD_CACHE_DIR}" "${ZIG_GLOBAL_CACHE_DIR}" "${ZIG_LOCAL_CACHE_DIR}"
+      rm -rf "${CARGO_ZIGBUILD_CACHE_DIR}" /root/.cache/cargo-zigbuild
+      # Zig 0.14+ may hit FD/cache related failures in constrained CI environments.
+      # Raise file descriptor limit early (best-effort) for all subsequent build steps.
+      ulimit -n 8192 || true
+      echo "ulimit -n: $(ulimit -n || echo unknown)"
+      echo "HOME=${HOME}"
+      echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}"
+      echo "CARGO_ZIGBUILD_CACHE_DIR=${CARGO_ZIGBUILD_CACHE_DIR}"
+    - |
+      # Ensure linker toolchain exists for crates that invoke C compiler/link checks (e.g. aws-lc-sys).
+      if command -v apt-get >/dev/null 2>&1; then
+        replace_apt_mirror_in_file() {
+          local file="$1"
+          sed -i \
+            -e "s@http://archive.ubuntu.com/ubuntu@${APT_UBUNTU_MIRROR}@g" \
+            -e "s@https://archive.ubuntu.com/ubuntu@${APT_UBUNTU_MIRROR}@g" \
+            -e "s@http://security.ubuntu.com/ubuntu@${APT_UBUNTU_MIRROR}@g" \
+            -e "s@https://security.ubuntu.com/ubuntu@${APT_UBUNTU_MIRROR}@g" \
+            -e "s@http://deb.debian.org/debian@${APT_DEBIAN_MIRROR}@g" \
+            -e "s@https://deb.debian.org/debian@${APT_DEBIAN_MIRROR}@g" \
+            -e "s@http://security.debian.org/debian-security@${APT_DEBIAN_SECURITY_MIRROR}@g" \
+            -e "s@https://security.debian.org/debian-security@${APT_DEBIAN_SECURITY_MIRROR}@g" \
+            "$file" || true
+        }
+
+        if [ -f /etc/apt/sources.list ]; then
+          replace_apt_mirror_in_file /etc/apt/sources.list
+        fi
+        if [ -d /etc/apt/sources.list.d ]; then
+          for apt_list in /etc/apt/sources.list.d/*.list; do
+            [ -f "$apt_list" ] || continue
+            replace_apt_mirror_in_file "$apt_list"
+          done
+        fi
+        rm -rf /var/lib/apt/lists/*
+        apt-get -o Acquire::Retries=5 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true update
+        DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+          binutils \
+          clang \
+          curl \
+          flatbuffers-compiler \
+          git \
+          lld \
+          openssh-client \
+          xz-utils \
+          ca-certificates
+      fi
+    - ld --version || true
+    - ld.lld --version || true
+    - flatc --version || true
+    - |
+      # Ensure Cargo is new enough for transitive crates that require edition2024 support.
+      if command -v rustup >/dev/null 2>&1; then
+        echo "Using RUSTUP_HOME=${RUSTUP_HOME}"
+        rustup toolchain install stable --profile minimal --no-self-update
+        rustup default stable
+      else
+        echo "❌ rustup not found in CI image; please update base image to a newer Rust toolchain"
+        exit 1
+      fi
+    - |
+      # Install Rust std target for cross builds (fixes: E0463 can't find crate for `core`).
+      HOST_RUST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+      if [ -n "${NAPI_TARGET:-}" ] && [ "${NAPI_TARGET}" != "${HOST_RUST_TARGET}" ]; then
+        echo "Installing Rust target: ${NAPI_TARGET} (host=${HOST_RUST_TARGET})"
+        rustup target add "${NAPI_TARGET}" --toolchain stable
+      else
+        echo "Rust target already native (${HOST_RUST_TARGET}), skip target add."
+      fi
+    - |
+      # Use TUNA mirror for crates.io to improve Cargo download reliability in CN regions.
+      mkdir -p "$CARGO_HOME"
+      cat > "$CARGO_HOME/config.toml" << 'EOF'
+      [source.crates-io]
+      replace-with = "tuna"
+
+      [source.tuna]
+      registry = "__CARGO_REGISTRY_URL__"
+
+      [net]
+      git-fetch-with-cli = true
+      retry = 5
+      EOF
+      sed -i "s|__CARGO_REGISTRY_URL__|${CARGO_REGISTRY_URL}|g" "$CARGO_HOME/config.toml"
+    - rustc --version
+    - cargo --version
+    - corepack enable || true
+    - yarn --version
+    - npm config set registry "${NPM_REGISTRY_URL}"
+    - npm config set fetch-retries 5
+    - npm config set fetch-retry-mintimeout 20000
+    - npm config set fetch-retry-maxtimeout 120000
+    - yarn config set npmRegistryServer "${NPM_REGISTRY_URL}"
+    - yarn config set httpTimeout 120000
+    - |
+      # Pre-install cross helper binaries in a clean host-compiler environment.
+      # This avoids napi-rs on-demand installation failure inside polluted cross env.
+      if [ "${NAPI_CROSS_COMPILE:-0}" = "1" ]; then
+        CROSS_HELPER=""
+        case "${NAPI_TARGET}" in
+          *-pc-windows-msvc)
+            CROSS_HELPER="cargo-xwin"
+            ;;
+          *)
+            CROSS_HELPER="cargo-zigbuild"
+            ;;
+        esac
+
+        if [ -n "${CROSS_HELPER}" ]; then
+          echo "Pre-installing ${CROSS_HELPER} for ${NAPI_TARGET}..."
+          INSTALL_ARGS="install ${CROSS_HELPER} --locked"
+          if [ "${CROSS_HELPER}" = "cargo-zigbuild" ]; then
+            INSTALL_ARGS="install ${CROSS_HELPER} --locked --version ${CARGO_ZIGBUILD_VERSION} --force"
+          fi
+          env \
+            -u CC -u CXX -u AR \
+            -u CC_x86_64_unknown_linux_gnu \
+            -u CC_x86_64-unknown-linux-gnu \
+            -u CXX_x86_64_unknown_linux_gnu \
+            -u CXX_x86_64-unknown-linux-gnu \
+            -u AR_x86_64_unknown_linux_gnu \
+            -u AR_x86_64-unknown-linux-gnu \
+            -u CFLAGS_x86_64_unknown_linux_gnu \
+            -u CFLAGS_x86_64-unknown-linux-gnu \
+            -u CXXFLAGS_x86_64_unknown_linux_gnu \
+            -u CXXFLAGS_x86_64-unknown-linux-gnu \
+            -u CC_aarch64_unknown_linux_gnu \
+            -u CXX_aarch64_unknown_linux_gnu \
+            -u AR_aarch64_unknown_linux_gnu \
+            -u CFLAGS_aarch64_unknown_linux_gnu \
+            -u CXXFLAGS_aarch64_unknown_linux_gnu \
+            -u CFLAGS -u CXXFLAGS -u LDFLAGS \
+            -u TARGET_CC -u TARGET_CXX -u TARGET_AR \
+            -u TARGET_CFLAGS -u TARGET_CXXFLAGS -u TARGET_LDFLAGS \
+            -u TARGET_SYSROOT -u TARGET_RANLIB -u TARGET_READELF \
+            -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
+            -u CARGO_BUILD_TARGET \
+            -u CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER \
+            -u CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS \
+            CC=gcc CXX=g++ AR=ar CFLAGS= CXXFLAGS= LDFLAGS= \
+            cargo ${INSTALL_ARGS}
+        fi
+      fi
+    - |
+      # cargo-zigbuild requires `zig` binary at runtime for non-Windows cross builds.
+      if [ "${NAPI_CROSS_COMPILE:-0}" = "1" ] && [[ "${NAPI_TARGET}" != *-pc-windows-msvc ]]; then
+        ZIG_EFFECTIVE_VERSION="${ZIG_VERSION}"
+        if [[ "${NAPI_TARGET}" == *-apple-darwin ]] && [ -n "${ZIG_VERSION_APPLE:-}" ]; then
+          # cargo-zigbuild currently has compatibility issues with zig 0.16.x on apple cross targets.
+          # Keep a stable zig line for darwin until upstream parsing panic is fixed.
+          ZIG_EFFECTIVE_VERSION="${ZIG_VERSION_APPLE}"
+        fi
+
+        ZIG_BIN_DIR="${CI_PROJECT_DIR}/.local/bin"
+        mkdir -p "${ZIG_BIN_DIR}"
+        export PATH="${ZIG_BIN_DIR}:${PATH}"
+
+        echo "Preparing zig ${ZIG_EFFECTIVE_VERSION} for ${NAPI_TARGET}..."
+        # Zig archive naming changed across versions; try both naming schemes.
+        # Prefer modern naming first so preloaded cache (e.g. zig-x86_64-linux-0.16.0.tar.xz) is hit immediately.
+        ZIG_ARCHIVE_CANDIDATES="zig-x86_64-linux-${ZIG_EFFECTIVE_VERSION}.tar.xz zig-linux-x86_64-${ZIG_EFFECTIVE_VERSION}.tar.xz"
+
+        mkdir -p /tmp/zig /cache
+        ZIG_ARCHIVE_PATH=""
+        CURL_RETRY_EXTRA=""
+        if curl --help all 2>/dev/null | grep -q -- '--retry-all-errors'; then
+          CURL_RETRY_EXTRA="--retry-all-errors"
+        fi
+
+        for candidate in ${ZIG_ARCHIVE_CANDIDATES}; do
+          [ -n "${candidate}" ] || continue
+          ZIG_URL="${ZIG_OFFICIAL_BASE}/${ZIG_EFFECTIVE_VERSION}/${candidate}"
+          ZIG_OUT="/cache/${candidate}"
+
+          if [ ! -f "${ZIG_OUT}" ]; then
+            echo "Cached archive not found, downloading: ${ZIG_URL}"
+            rm -f "${ZIG_OUT}"
+
+            for attempt in 1 2 3 4 5; do
+              echo "Downloading (${attempt}/5): ${ZIG_URL}"
+              if curl -fL --retry 8 --retry-delay 2 --connect-timeout 20 \
+                ${CURL_RETRY_EXTRA} \
+                -C - "${ZIG_URL}" -o "${ZIG_OUT}"; then
+                break
+              fi
+              sleep 2
+            done
+          else
+            echo "Using cached archive: ${ZIG_OUT}"
+          fi
+
+          if [ -f "${ZIG_OUT}" ] && tar -tf "${ZIG_OUT}" >/dev/null 2>&1; then
+            ZIG_ARCHIVE_PATH="${ZIG_OUT}"
+            break
+          fi
+
+          echo "Archive invalid or unavailable: ${ZIG_OUT}"
+          rm -f "${ZIG_OUT}"
+        done
+
+        if [ -z "${ZIG_ARCHIVE_PATH}" ]; then
+          echo "❌ Failed to prepare zig ${ZIG_EFFECTIVE_VERSION} archive"
+          exit 1
+        fi
+
+        # Keep the full Zig distribution (binary + lib dir).
+        # Use project-local extraction path to avoid cross-project race/corruption on shared /cache.
+        # Copying only the zig binary breaks cargo-zigbuild because zig cannot find its installation dir.
+        ZIG_DIST_ROOT="${CI_PROJECT_DIR}/.zig-dist/${ZIG_EFFECTIVE_VERSION}"
+        ZIG_EXTRACT_DIR="${ZIG_DIST_ROOT}/extract"
+        mkdir -p "${ZIG_DIST_ROOT}"
+
+        ZIG_BIN_PATH=""
+        ZIG_SDK_SETTINGS_PATH=""
+        if [ -d "${ZIG_EXTRACT_DIR}" ]; then
+          ZIG_BIN_PATH="$(find "${ZIG_EXTRACT_DIR}" -type f -name zig | head -n 1 || true)"
+          ZIG_SDK_SETTINGS_PATH="$(find "${ZIG_EXTRACT_DIR}" -type f -path '*/lib/libc/darwin/SDKSettings.json' | head -n 1 || true)"
+        fi
+        if [ -z "${ZIG_BIN_PATH}" ] || [ ! -x "${ZIG_BIN_PATH}" ] || [ -z "${ZIG_SDK_SETTINGS_PATH}" ] || [ ! -s "${ZIG_SDK_SETTINGS_PATH}" ]; then
+          rm -rf "${ZIG_EXTRACT_DIR}"
+          mkdir -p "${ZIG_EXTRACT_DIR}"
+          tar -xf "${ZIG_ARCHIVE_PATH}" -C "${ZIG_EXTRACT_DIR}"
+          ZIG_BIN_PATH="$(find "${ZIG_EXTRACT_DIR}" -type f -name zig | head -n 1 || true)"
+          ZIG_SDK_SETTINGS_PATH="$(find "${ZIG_EXTRACT_DIR}" -type f -path '*/lib/libc/darwin/SDKSettings.json' | head -n 1 || true)"
+        fi
+
+        if [ -z "${ZIG_BIN_PATH}" ] || [ ! -x "${ZIG_BIN_PATH}" ]; then
+          echo "❌ Failed to locate zig binary from ${ZIG_ARCHIVE_PATH}"
+          exit 1
+        fi
+        if [ -z "${ZIG_SDK_SETTINGS_PATH}" ] || [ ! -s "${ZIG_SDK_SETTINGS_PATH}" ]; then
+          echo "❌ Zig darwin SDK metadata missing after extract: lib/libc/darwin/SDKSettings.json"
+          exit 1
+        fi
+
+        printf '#!/bin/sh\nexec "%s" "$@"\n' "${ZIG_BIN_PATH}" > "${ZIG_BIN_DIR}/zig"
+        chmod 0755 "${ZIG_BIN_DIR}/zig"
+        export CARGO_ZIGBUILD_ZIG_PATH="${ZIG_BIN_PATH}"
+
+        echo "Using zig: $(command -v zig)"
+        echo "CARGO_ZIGBUILD_ZIG_PATH=${CARGO_ZIGBUILD_ZIG_PATH}"
+        zig version
+        if ! zig version | grep -q "^${ZIG_EFFECTIVE_VERSION}"; then
+          echo "❌ zig version mismatch: expected ${ZIG_EFFECTIVE_VERSION}"
+          exit 1
+        fi
+      fi
+    - |
+      # This package only ships GitLab CI artifacts, not npm platform packages.
+      # Remove optional native package deps to avoid 404 lookups on npm registry.
+      npm pkg delete optionalDependencies
+    - yarn install --immutable || yarn install --frozen-lockfile || yarn install
+  script:
+    - |
+      echo "Building ${APP_NAME} for ${NAPI_TARGET}..."
+      echo "Build args: ${NAPI_BUILD_ARGS:-<none>}"
+
+      # Avoid inherited compiler flags from the base image that may interfere with cross-toolchains.
+      BUILD_HOME="${HOME:-}"
+      if [[ "${NAPI_BUILD_ARGS:-}" == *"--use-napi-cross"* ]] || [[ "${NAPI_BUILD_ARGS:-}" == *"--cross-compile"* ]]; then
+        BUILD_HOME="${CI_PROJECT_DIR}"
+        mkdir -p "${BUILD_HOME}/.napi-rs"
+      fi
+
+      # Keep zig/cargo-zigbuild caches in project workspace to avoid /root/.cache permission/cache corruption issues.
+      BUILD_XDG_CACHE_HOME="${CI_PROJECT_DIR}/.cache"
+      BUILD_CARGO_ZIGBUILD_CACHE_DIR="${BUILD_XDG_CACHE_HOME}/cargo-zigbuild"
+      BUILD_ZIG_GLOBAL_CACHE_DIR="${CI_PROJECT_DIR}/.zig-cache/global"
+      BUILD_ZIG_LOCAL_CACHE_DIR="${CI_PROJECT_DIR}/.zig-cache/local"
+      mkdir -p "${BUILD_XDG_CACHE_HOME}" "${BUILD_CARGO_ZIGBUILD_CACHE_DIR}" "${BUILD_ZIG_GLOBAL_CACHE_DIR}" "${BUILD_ZIG_LOCAL_CACHE_DIR}"
+
+      if [[ "${NAPI_BUILD_ARGS:-}" == *"--cross-compile"* ]]; then
+        rm -rf "${BUILD_CARGO_ZIGBUILD_CACHE_DIR}" /root/.cache/cargo-zigbuild
+        mkdir -p "${BUILD_CARGO_ZIGBUILD_CACHE_DIR}"
+      fi
+
+      BUILD_ARGS_EFFECTIVE="${NAPI_BUILD_ARGS:-}"
+      TARGET_LINKER_ENV_NAME=""
+      TARGET_LINKER_ENV_VALUE=""
+      TARGET_CC_ENV_NAME=""
+      TARGET_CC_ENV_VALUE=""
+      TARGET_CXX_ENV_NAME=""
+      TARGET_CXX_ENV_VALUE=""
+      TARGET_AR_ENV_NAME=""
+      TARGET_AR_ENV_VALUE=""
+      DARWIN_FORCE_LEGACY_BUILD_CMD="0"
+
+      # Work around cargo-zigbuild parser/cache failures on darwin cross builds by
+      # using cargo build + explicit zig linker instead of `--cross-compile`.
+      if [[ "${NAPI_TARGET}" == *-apple-darwin ]] && [[ "${BUILD_ARGS_EFFECTIVE}" == *"--cross-compile"* ]]; then
+        if [ -z "${CARGO_ZIGBUILD_ZIG_PATH:-}" ] || [ ! -x "${CARGO_ZIGBUILD_ZIG_PATH}" ]; then
+          echo "❌ Missing CARGO_ZIGBUILD_ZIG_PATH for darwin zig linker path"
+          exit 1
+        fi
+
+        ZIG_DARWIN_ARCH=""
+        TARGET_TRIPLE_ENV=""
+        case "${NAPI_TARGET}" in
+          x86_64-apple-darwin)
+            ZIG_DARWIN_ARCH="x86_64"
+            TARGET_TRIPLE_ENV="X86_64_APPLE_DARWIN"
+            ;;
+          aarch64-apple-darwin)
+            ZIG_DARWIN_ARCH="aarch64"
+            TARGET_TRIPLE_ENV="AARCH64_APPLE_DARWIN"
+            ;;
+          *)
+            echo "❌ Unsupported darwin target: ${NAPI_TARGET}"
+            exit 1
+            ;;
+        esac
+
+        ZIG_LINKER="${CI_PROJECT_DIR}/.local/bin/zig-linker-${NAPI_TARGET}"
+        cat > "${ZIG_LINKER}" <<EOF
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      zig_bin="${CARGO_ZIGBUILD_ZIG_PATH}"
+      darwin_arch="${ZIG_DARWIN_ARCH}"
+      args=()
+
+      while (( \$# )); do
+        arg="\$1"
+        shift
+
+          case "\$arg" in
+            --target=x86_64-apple-macosx*|--target=x86_64-apple-darwin*)
+              # zig cc target syntax differs from clang-style triples used by cc-rs.
+              args+=("-target" "x86_64-macos")
+              ;;
+            --target=arm64-apple-macosx*|--target=aarch64-apple-macosx*|--target=arm64-apple-darwin*|--target=aarch64-apple-darwin*)
+              # zig expects aarch64 naming and macOS OS tag.
+              args+=("-target" "aarch64-macos")
+              ;;
+            -arch)
+              arch="\${1:-}"
+              if [[ -n "\$arch" ]]; then
+                shift
+              fi
+            if [[ "\$arch" == "arm64" ]]; then
+              arch="aarch64"
+            fi
+            args+=("-arch" "\$arch")
+            ;;
+          -gfull)
+            # clang on Linux-based zig toolchain may reject -gfull; use portable -g.
+            args+=("-g")
+            ;;
+          -mmacosx-version-min=10.*)
+            # arm64 macOS requires 11.0+ deployment target.
+            if [[ "\$darwin_arch" == "aarch64" ]]; then
+              args+=("-mmacosx-version-min=11.0")
+            else
+              args+=("\$arg")
+            fi
+            ;;
+          *)
+            args+=("\$arg")
+            ;;
+        esac
+      done
+
+      exec "\$zig_bin" cc "\${args[@]}"
+      EOF
+        chmod 0755 "${ZIG_LINKER}"
+
+        TARGET_LINKER_ENV_NAME="CARGO_TARGET_${TARGET_TRIPLE_ENV}_LINKER"
+        TARGET_LINKER_ENV_VALUE="${ZIG_LINKER}"
+        TARGET_CC_ENV_NAME="CC_${NAPI_TARGET//-/_}"
+        TARGET_CC_ENV_VALUE="${ZIG_LINKER}"
+        TARGET_CXX_ENV_NAME="CXX_${NAPI_TARGET//-/_}"
+        TARGET_CXX_ENV_VALUE="${ZIG_LINKER}"
+        ZIG_AR_WRAPPER="${CI_PROJECT_DIR}/.local/bin/zig-ar-${NAPI_TARGET}"
+        printf '#!/bin/sh\nexec "%s" ar "$@"\n' "${CARGO_ZIGBUILD_ZIG_PATH}" > "${ZIG_AR_WRAPPER}"
+        chmod 0755 "${ZIG_AR_WRAPPER}"
+        TARGET_AR_ENV_NAME="AR_${NAPI_TARGET//-/_}"
+        TARGET_AR_ENV_VALUE="${ZIG_AR_WRAPPER}"
+
+        BUILD_ARGS_EFFECTIVE=""
+        DARWIN_FORCE_LEGACY_BUILD_CMD="1"
+        echo "Darwin workaround enabled: using explicit zig linker, disabling --cross-compile"
+      fi
+
+      if [ "${DARWIN_FORCE_LEGACY_BUILD_CMD}" = "1" ]; then
+        # Keep darwin workaround on explicit target command because build:darwin:* scripts
+        # currently hardcode --cross-compile.
+        BUILD_CMD=(yarn build --target "${NAPI_TARGET}")
+      elif [ -n "${BUILD_SCRIPT:-}" ]; then
+        BUILD_CMD=(yarn "${BUILD_SCRIPT}")
+      else
+        BUILD_CMD=(yarn build --target "${NAPI_TARGET}")
+      fi
+      if [ -n "${BUILD_ARGS_EFFECTIVE}" ]; then
+        BUILD_CMD+=(${BUILD_ARGS_EFFECTIVE})
+      fi
+
+      BUILD_ENV_ARGS=(
+        -u CC
+        -u CXX
+        -u AR
+        -u CFLAGS
+        -u CXXFLAGS
+        -u LDFLAGS
+        -u RUSTFLAGS
+        -u CARGO_ENCODED_RUSTFLAGS
+        "HOME=${BUILD_HOME}"
+        "XDG_CACHE_HOME=${BUILD_XDG_CACHE_HOME}"
+        "CARGO_ZIGBUILD_CACHE_DIR=${BUILD_CARGO_ZIGBUILD_CACHE_DIR}"
+        "CARGO_ZIGBUILD_ZIG_PATH=${CARGO_ZIGBUILD_ZIG_PATH:-}"
+        "ZIG_GLOBAL_CACHE_DIR=${BUILD_ZIG_GLOBAL_CACHE_DIR}"
+        "ZIG_LOCAL_CACHE_DIR=${BUILD_ZIG_LOCAL_CACHE_DIR}"
+      )
+      if [ -n "${TARGET_LINKER_ENV_NAME}" ]; then
+        BUILD_ENV_ARGS+=("${TARGET_LINKER_ENV_NAME}=${TARGET_LINKER_ENV_VALUE}")
+      fi
+      if [ -n "${TARGET_CC_ENV_NAME}" ]; then
+        BUILD_ENV_ARGS+=("${TARGET_CC_ENV_NAME}=${TARGET_CC_ENV_VALUE}")
+      fi
+      if [ -n "${TARGET_CXX_ENV_NAME}" ]; then
+        BUILD_ENV_ARGS+=("${TARGET_CXX_ENV_NAME}=${TARGET_CXX_ENV_VALUE}")
+      fi
+      if [ -n "${TARGET_AR_ENV_NAME}" ]; then
+        BUILD_ENV_ARGS+=("${TARGET_AR_ENV_NAME}=${TARGET_AR_ENV_VALUE}")
+      fi
+
+      env "${BUILD_ENV_ARGS[@]}" "${BUILD_CMD[@]}"
+
+      if [ ! -f "${NODE_FILE}" ]; then
+        echo "❌ Missing output file: ${NODE_FILE}"
+        exit 1
+      fi
+
+      mkdir -p dist
+      cp "${NODE_FILE}" "dist/${NODE_FILE}"
+      echo "✅ Built dist/${NODE_FILE}"
+  artifacts:
+    paths:
+      - dist/*.node
+    expire_in: 1 week
+  only:
+    - main
+    - tags
+
+build-linux-x64-musl:
+  <<: *build_template
+  variables:
+    NAPI_TARGET: x86_64-unknown-linux-musl
+    NODE_FILE: tunnel.linux-x64-musl.node
+    NAPI_CROSS_COMPILE: '1'
+    NAPI_BUILD_ARGS: '--cross-compile'
+    BUILD_SCRIPT: build:linux:x64-musl
+
+build-linux-arm64-gnu:
+  <<: *build_template
+  variables:
+    NAPI_TARGET: aarch64-unknown-linux-gnu
+    NODE_FILE: tunnel.linux-arm64-gnu.node
+    NAPI_BUILD_ARGS: '--use-napi-cross'
+    BUILD_SCRIPT: build:linux:arm64-gnu
+    CARGO_PROFILE_RELEASE_DEBUG: '0'
+    CFLAGS_aarch64_unknown_linux_gnu: '-g0'
+    CXXFLAGS_aarch64_unknown_linux_gnu: '-g0'
+    TARGET_CFLAGS: '-g0'
+    TARGET_CXXFLAGS: '-g0'
+
+build-win32-x64-msvc:
+  <<: *build_template
+  variables:
+    NAPI_TARGET: x86_64-pc-windows-msvc
+    NODE_FILE: tunnel.win32-x64-msvc.node
+    NAPI_CROSS_COMPILE: '1'
+    NAPI_BUILD_ARGS: '--cross-compile'
+    BUILD_SCRIPT: build:win32:x64
+    XWIN_ARCH: x86_64
+    XWIN_CROSS_COMPILER: clang
+    CFLAGS_x86_64_pc_windows_msvc: '/WX-'
+    CXXFLAGS_x86_64_pc_windows_msvc: '/WX-'
+
+build-win32-arm64-msvc:
+  <<: *build_template
+  variables:
+    NAPI_TARGET: aarch64-pc-windows-msvc
+    NODE_FILE: tunnel.win32-arm64-msvc.node
+    NAPI_CROSS_COMPILE: '1'
+    NAPI_BUILD_ARGS: '--cross-compile'
+    BUILD_SCRIPT: build:win32:arm64
+    XWIN_ARCH: aarch64
+    XWIN_CROSS_COMPILER: clang
+    CFLAGS_aarch64_pc_windows_msvc: '/WX-'
+    CXXFLAGS_aarch64_pc_windows_msvc: '/WX-'
+
+build-darwin-x64:
+  <<: *build_template
+  variables:
+    NAPI_TARGET: x86_64-apple-darwin
+    NODE_FILE: tunnel.darwin-x64.node
+    NAPI_CROSS_COMPILE: '1'
+    NAPI_BUILD_ARGS: '--cross-compile'
+    BUILD_SCRIPT: build:darwin:x64
+    ZIG_VERSION: '0.15.2'
+
+build-darwin-arm64:
+  <<: *build_template
+  variables:
+    NAPI_TARGET: aarch64-apple-darwin
+    NODE_FILE: tunnel.darwin-arm64.node
+    NAPI_CROSS_COMPILE: '1'
+    NAPI_BUILD_ARGS: '--cross-compile'
+    BUILD_SCRIPT: build:darwin:arm64
+    MACOSX_DEPLOYMENT_TARGET: '11.0'
+    ZIG_VERSION: '0.15.2'
+
+package-bindings:
+  stage: package
+  image: alpine:latest
+  dependencies:
+    - build-linux-x64-musl
+    - build-linux-arm64-gnu
+    - build-win32-x64-msvc
+    - build-win32-arm64-msvc
+    - build-darwin-x64
+    - build-darwin-arm64
+  script:
+    - |
+      REQUIRED_FILES="
+      tunnel.linux-x64-musl.node
+      tunnel.linux-arm64-gnu.node
+      tunnel.win32-x64-msvc.node
+      tunnel.win32-arm64-msvc.node
+      tunnel.darwin-x64.node
+      tunnel.darwin-arm64.node
+      "
+
+      for file in ${REQUIRED_FILES}; do
+        if [ ! -f "dist/${file}" ]; then
+          echo "❌ Missing required binding: dist/${file}"
+          exit 1
+        fi
+      done
+
+      (
+        cd dist
+        sha256sum *.node > SHA256SUMS
+        tar -czf transport-bindings.tar.gz *.node SHA256SUMS
+      )
+
+      echo "✅ Packaged dist/transport-bindings.tar.gz"
+  artifacts:
+    paths:
+      - dist/*.node
+      - dist/SHA256SUMS
+      - dist/transport-bindings.tar.gz
+    expire_in: 1 week
+  only:
+    - main
+    - tags

@@ -1,20 +1,78 @@
 
 [package]
-authors = ["LongYinan <lynweklm@gmail.com>"]
+authors = ["hilo <hilow6631@gmail.com"]
 edition = "2021"
-name = "tunnel"
+name    = "yat-transport"
 version = "0.1.0"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default       = []
+napi-bindings = ["dep:napi", "dep:napi-derive"]
 
 [dependencies]
-napi = "3.0.0"
-napi-derive = "3.0.0"
+# NAPI (optional, only for Electron native binding)
+napi = { version = "3.8", features = [
+  "napi6",
+  "async",
+  "tokio_rt",
+], optional = true }
+napi-derive = { version = "3.5", optional = true }
+
+# Protocol
+flatbuffers = "24.3.25"
+
+# Async Runtime
+tokio = { version = "1", features = [
+  "net",
+  "rt-multi-thread",
+  "sync",
+  "time",
+  "io-util",
+  "macros",
+] }
+
+# TCP socket options (keepalive)
+socket2 = { version = "0.5", features = ["all"] }
+
+# TLS
+rustls = { version = "0.23", default-features = false, features = [
+  "std",
+  "tls12",
+  "ring",
+] }
+rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = [
+  "tls12",
+  "ring",
+] }
+webpki-roots = "1.0"
+
+# QUIC
+quinn = { version = "0.11", default-features = false, features = [
+  "runtime-tokio",
+  "ring",
+  "rustls",
+] }
+
+# Crypto & Certificates
+rcgen = "0.14"
+
+# Error handling
+thiserror = "2"
+
+# Logging
+log        = "0.4"
+ring       = "0.17.14"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+semver     = "1"
 
 [build-dependencies]
 napi-build = "2"
 
-[profile.release]
-lto = true
-strip = "symbols"
+#[profile.release]
+#lto = true
+#strip = "debuginfo"

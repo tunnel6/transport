@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REAL_CLANG="/opt/homebrew/opt/llvm@21/bin/clang"
+if [[ ! -x "$REAL_CLANG" ]]; then
+  REAL_CLANG="/usr/bin/clang"
+fi
+
+args=()
+expect_imsvc_path=0
+for arg in "$@"; do
+  if [[ "$expect_imsvc_path" == "1" ]]; then
+    args+=("-isystem" "$arg")
+    expect_imsvc_path=0
+    continue
+  fi
+
+  case "$arg" in
+    /imsvc)
+      expect_imsvc_path=1
+      ;;
+    /EHsc)
+      ;;
+    *)
+      args+=("$arg")
+      ;;
+  esac
+done
+
+exec "$REAL_CLANG" "${args[@]}"

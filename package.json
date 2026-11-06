@@ -1,21 +1,20 @@
 {
-  "name": "tunnel",
+  "name": "@yat/tunnel",
   "version": "1.0.0",
-  "description": "Template project for writing node package with napi-rs",
+  "description": "YAT tunnel transport layer with native bindings",
   "main": "index.js",
+  "types": "index.d.ts",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/napi-rs/package-template.git"
+    "url": "git+ssh://git@github.com/yat/tunnel.git"
   },
   "license": "MIT",
   "browser": "browser.js",
   "keywords": [
     "napi-rs",
-    "NAPI",
-    "N-API",
-    "Rust",
-    "node-addon",
-    "node-addon-api"
+    "tunnel",
+    "transport",
+    "mTLS"
   ],
   "files": [
     "index.d.ts",
@@ -27,11 +26,9 @@
     "targets": [
       "x86_64-pc-windows-msvc",
       "x86_64-apple-darwin",
-      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
       "aarch64-unknown-linux-gnu",
-      "i686-pc-windows-msvc",
       "aarch64-apple-darwin",
-      "x86_64-unknown-freebsd",
       "aarch64-pc-windows-msvc"
     ]
   },
@@ -45,8 +42,18 @@
   "scripts": {
     "artifacts": "napi artifacts",
     "bench": "node --import @oxc-node/core/register benchmark/bench.ts",
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
+    "build": "napi build --platform --release --features napi-bindings",
+    "build:linux:x64-gnu": "mkdir -p .cache .zig-cache/global .zig-cache/local && XDG_CACHE_HOME=$PWD/.cache ZIG_GLOBAL_CACHE_DIR=$PWD/.zig-cache/global ZIG_LOCAL_CACHE_DIR=$PWD/.zig-cache/local AR=/opt/homebrew/opt/llvm@21/bin/llvm-ar TARGET_AR=/opt/homebrew/opt/llvm@21/bin/llvm-ar AR_x86_64_unknown_linux_gnu=/opt/homebrew/opt/llvm@21/bin/llvm-ar CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_AR=/opt/homebrew/opt/llvm@21/bin/llvm-ar napi build --platform --release --target x86_64-unknown-linux-gnu --cross-compile --features napi-bindings",
+    "build:linux:x64-musl": "mkdir -p .cache .zig-cache/global .zig-cache/local && XDG_CACHE_HOME=$PWD/.cache ZIG_GLOBAL_CACHE_DIR=$PWD/.zig-cache/global ZIG_LOCAL_CACHE_DIR=$PWD/.zig-cache/local AR=/opt/homebrew/opt/llvm@21/bin/llvm-ar TARGET_AR=/opt/homebrew/opt/llvm@21/bin/llvm-ar AR_x86_64_unknown_linux_musl=/opt/homebrew/opt/llvm@21/bin/llvm-ar CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_AR=/opt/homebrew/opt/llvm@21/bin/llvm-ar napi build --platform --release --target x86_64-unknown-linux-musl --cross-compile --features napi-bindings",
+    "build:linux:arm64-gnu": "mkdir -p .cache .zig-cache/global .zig-cache/local && XDG_CACHE_HOME=$PWD/.cache ZIG_GLOBAL_CACHE_DIR=$PWD/.zig-cache/global ZIG_LOCAL_CACHE_DIR=$PWD/.zig-cache/local AR=/opt/homebrew/opt/llvm@21/bin/llvm-ar TARGET_AR=/opt/homebrew/opt/llvm@21/bin/llvm-ar AR_aarch64_unknown_linux_gnu=/opt/homebrew/opt/llvm@21/bin/llvm-ar CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_AR=/opt/homebrew/opt/llvm@21/bin/llvm-ar napi build --platform --release --target aarch64-unknown-linux-gnu --cross-compile --features napi-bindings",
+    "build:darwin:x64": "napi build --platform --release --target x86_64-apple-darwin --features napi-bindings",
+    "build:darwin:arm64": "napi build --platform --release --target aarch64-apple-darwin --features napi-bindings",
+    "build:win32:arm64": "napi build --platform --release --target aarch64-pc-windows-msvc --features napi-bindings",
+    "build:win32:x64": "napi build --release --target x86_64-pc-windows-msvc --features napi-bindings",
+    "build:cross:win32:x64": "mkdir -p .cache .zig-cache/global .zig-cache/local .xwin scripts/win-toolchain && XWIN_CACHE_DIR=$PWD/.xwin XDG_CACHE_HOME=$PWD/.cache CARGO_ZIGBUILD_CACHE_DIR=$PWD/.cache/cargo-zigbuild ZIG_GLOBAL_CACHE_DIR=$PWD/.zig-cache/global ZIG_LOCAL_CACHE_DIR=$PWD/.zig-cache/local PATH=\"$PWD/scripts/win-toolchain:/opt/homebrew/opt/llvm@21/bin:/usr/local/opt/llvm/bin:$PATH\" AR_x86_64_pc_windows_msvc=llvm-lib CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_AR=llvm-lib napi build --platform --release --target x86_64-pc-windows-msvc --cross-compile --features napi-bindings",
+    "build:cross:win32:arm64": "mkdir -p .cache .zig-cache/global .zig-cache/local .xwin scripts/win-toolchain && XWIN_CACHE_DIR=$PWD/.xwin XDG_CACHE_HOME=$PWD/.cache CARGO_ZIGBUILD_CACHE_DIR=$PWD/.cache/cargo-zigbuild ZIG_GLOBAL_CACHE_DIR=$PWD/.zig-cache/global ZIG_LOCAL_CACHE_DIR=$PWD/.zig-cache/local PATH=\"$PWD/scripts/win-toolchain:/opt/homebrew/opt/llvm@21/bin:/usr/local/opt/llvm/bin:$PATH\" AR_aarch64_pc_windows_msvc=llvm-lib CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_AR=llvm-lib napi build --platform --release --target aarch64-pc-windows-msvc --cross-compile --features napi-bindings",
+    "build:all": "run-s build:linux:x64-musl build:linux:arm64-gnu build:darwin:x64 build:darwin:arm64 build:win32:x64 build:win32:arm64",
+    "build:debug": "napi build --platform --features napi-bindings",
     "format": "run-p format:prettier format:rs format:toml",
     "format:prettier": "prettier . -w",
     "format:toml": "taplo format",
@@ -54,7 +61,7 @@
     "lint": "oxlint .",
     "prepublishOnly": "napi prepublish -t npm",
     "test": "ava",
-    "preversion": "napi build --platform && git add .",
+    "preversion": "napi build --platform --features napi-bindings && git add .",
     "version": "napi version",
     "prepare": "husky"
   },
@@ -65,6 +72,7 @@
     "@oxc-node/core": "^0.0.35",
     "@taplo/cli": "^0.7.0",
     "@tybys/wasm-util": "^0.10.0",
+    "@types/node": "^22.0.0",
     "ava": "^6.4.1",
     "chalk": "^5.6.2",
     "husky": "^9.1.7",
